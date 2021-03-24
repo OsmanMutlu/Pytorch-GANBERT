@@ -1,4 +1,7 @@
 from torch import nn
+from torch import tensor as torch_tensor
+from tensorflow.train import load_checkpoint
+import re
 
 # NOTE: Produces a document representation directly from noise. Since we do not use a source sample here in any way, this method can't really be used for DA. This is purely to see if we can train a GAN.
 # Same as GAN-BERT paper
@@ -34,3 +37,52 @@ class Discriminator(nn.Module):
         logits = self.logit(last_rep)
         probs = self.softmax(logits)
         return last_rep, logits, probs
+
+def convert_to_tf_param_name(torch_param_name, model_name="bert"):
+    tf_param_name = ""
+    if model_name == "bert":
+        tf_param_name = tf_param_name + "bert/"
+        if "embeddings" in torch_param_name:
+            if ".weight" in torch_param_name:
+                torch_param_name = torch_param_name[:-7]
+
+            tf_param_name = tf_param_name + torch_param_name.replace(".", "/")
+
+        elif "encoder" in torch_param_name:
+            torch_param_name = re.sub("layer\.([0-9]+)\.", "layer_\g<1>.", torch_param_name)
+            torch_param_name = torch_param_name.replace("weight", "kernel").replace(".", "/")
+            tf_param_name = tf_param_name + torch_param_name
+
+        else: # pooler
+            torch_param_name = torch_param_name.replace("weight", "kernel").replace(".", "/")
+            tf_param_name = tf_param_name + torch_param_name
+
+    elif model_name == "dis": # discriminator
+        tf_param_name = tf_param_name + "Discriminator/"
+        torch_param_name = torch_param_name.replace("logit", "dense_1").replace("layers.0", "dense")
+        torch_param_name = torch_param_name.replace("weight", "kernel").replace(".", "/")
+        tf_param_name = tf_param_name + torch_param_name
+
+    elif model_name == "gen": # generator
+        tf_param_name = tf_param_name + "Generator/"
+        torch_param_name = torch_param_name.replace("layers.3", "dense_1").replace("layers.0", "dense")
+        torch_param_name = torch_param_name.replace("weight", "kernel").replace(".", "/")
+        tf_param_name = tf_param_name + torch_param_name
+
+    else:
+        raise "Wrong model_name!"
+
+    return tf_param_name
+
+def get_weights_from_tf(model, tf_model_path, model_name="bert"):
+    reader = load_checkpoint(tf_model_path)
+    weight_names = sorted(reader.get_variable_to_shape_map().keys())
+    for name, param in model.named_parameters():
+        curr_tf_param = convert_to_tf_param_name(name, model_name=model_name)
+        curr_tf_weight = reader.get_tensor(curr_tf_param)
+        if "kernel" in curr_tf_param:
+            curr_tf_weight = curr_tf_weight.transpose()
+
+        param.data = torch_tensor(curr_tf_weight)
+
+    return model

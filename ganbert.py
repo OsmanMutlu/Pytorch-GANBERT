@@ -1,20 +1,18 @@
-import csv
+import sys
 import os
 import logging
-import argparse
 import random
 import datetime
 from tqdm import tqdm, trange
 from pathlib import Path
-import math
-from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef
+
+from model import Generator1, Discriminator, get_weights_from_tf
 
 import numpy as np
-import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
-
-from model import Generator1, Discriminator
+from torch.utils.data import DataLoader
+from data import DomainData, get_examples_qc_fine, get_examples
 
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.modeling import BertModel
@@ -31,39 +29,88 @@ PYTORCH_PRETRAINED_BERT_CACHE = Path(os.getenv('PYTORCH_PRETRAINED_BERT_CACHE',
 
 logger.info(PYTORCH_PRETRAINED_BERT_CACHE)
 
-max_seq_length = 512
-batch_size = 32
-bert_learning_rate = 2e-5
-learning_rate = 1e-4
+repo_path = sys.argv[1]
+task_name = sys.argv[2] # "qc_fine", "amazon", "clef"
+tokenizer = BertTokenizer.from_pretrained(repo_path + "/../.pytorch_pretrained_bert/bert-base-uncased-vocab.txt")
+bert_model = repo_path + "/../.pytorch_pretrained_bert/bert-base-uncased.tar.gz"
+nll_loss = torch.nn.CrossEntropyLoss(ignore_index=-1)
+adversarial_loss = torch.nn.BCELoss()
+
+learning_rate = 2e-5
 noise_size = 100
 epsilon = 1e-8
-unlabel_rate = 0.02
-
-label_list = ["0", "1"]
-tokenizer = BertTokenizer.from_pretrained("/home/omutlu/.pytorch_pretrained_bert/bert-base-uncased-vocab.txt")
-bert_model = "/home/omutlu/.pytorch_pretrained_bert/bert-base-uncased.tar.gz"
-repo_path = "/home/omutlu/domain_adaptation/"
-# train_filename = "/home/omutlu/domain_adaptation/data/sorted_data/books/train.json"
-# val_filename = "/home/omutlu/domain_adaptation/data/sorted_data/books/val.json"
-# test_filename = "/home/omutlu/domain_adaptation/data/sorted_data/electronics/test.json"
-train_filename = repo_path + "data/domain_corpus_data/clef/balanced_india_train.json"
-val_filename = repo_path + "data/domain_corpus_data/clef/india_dev.json"
-test_filename = repo_path + "data/domain_corpus_data/clef/india_test.json"
-bert_output_file = repo_path + "models/doc_gan/gan-bert_512_32_1e-4_0,02_bert.pt"
-dis_output_file = repo_path + "models/doc_gan/gan-bert_512_32_1e-4_0,02_dis.pt"
+label_rate = 0.02
 total_epoch_num = 30
 warmup_proportion = 0.1
 
+
+if task_name == "qc_fine":
+    max_seq_length = 64
+    batch_size = 64
+    validation = False
+    train_filename = repo_path + "/../domain_adaptation/doc_gan/ganbert_tf/data/labeled_and_unlabeled.tsv"
+    test_filename = repo_path + "/../domain_adaptation/doc_gan/ganbert_tf/data/test.tsv"
+    bert_output_file = repo_path + "/../domain_adaptation/models/doc_gan/qc-fine_gan-bert_64_64_2e-5_30_bert.pt"
+    dis_output_file = repo_path + "/../domain_adaptation/models/doc_gan/qc-fine_gan-bert_64_64_2e-5_30_dis.pt"
+    label_list = ["ABBR_abb", "ABBR_exp", "DESC_def", "DESC_desc", "DESC_manner", "DESC_reason", "ENTY_animal", "ENTY_body", "ENTY_color", "ENTY_cremat", "ENTY_currency", "ENTY_dismed", "ENTY_event", "ENTY_food", "ENTY_instru", "ENTY_lang", "ENTY_letter", "ENTY_other", "ENTY_plant", "ENTY_product", "ENTY_religion", "ENTY_sport", "ENTY_substance", "ENTY_symbol", "ENTY_techmeth", "ENTY_termeq", "ENTY_veh", "ENTY_word", "HUM_desc", "HUM_gr", "HUM_ind", "HUM_title", "LOC_city", "LOC_country", "LOC_mount", "LOC_other", "LOC_state", "NUM_code", "NUM_count", "NUM_date", "NUM_dist", "NUM_money", "NUM_ord", "NUM_other", "NUM_perc", "NUM_period", "NUM_speed", "NUM_temp", "NUM_volsize", "NUM_weight"]
+    get_examples_fct = get_examples_qc_fine
+
+elif task_name == "amazon":
+    max_seq_length = 512
+    batch_size = 32
+    validation = True
+    train_filename = "/../domain_adaptation/data/sorted_data/books/train.json"
+    val_filename = "/../domain_adaptation/data/sorted_data/books/val.json"
+    test_filename = "/../domain_adaptation/data/sorted_data/electronics/test.json"
+    bert_output_file = repo_path + "/../domain_adaptation/models/doc_gan/books_gan-bert_512_32_2e-5_0,02_bert.pt"
+    dis_output_file = repo_path + "/../domain_adaptation/models/doc_gan/books_gan-bert_512_32_2e-5_0,02_dis.pt"
+    label_list = ["0", "1"]
+    get_examples_fct = get_examples
+
+elif task_name == "clef":
+    max_seq_length = 512
+    batch_size = 32
+    validation = True
+    train_filename = repo_path + "/../domain_adaptation/data/domain_corpus_data/clef/balanced_india_train.json"
+    val_filename = repo_path + "/../domain_adaptation/data/domain_corpus_data/clef/india_dev.json"
+    test_filename = repo_path + "/../domain_adaptation/data/domain_corpus_data/clef/india_test.json"
+    bert_output_file = repo_path + "/../domain_adaptation/models/doc_gan/asd_india_gan-bert_512_32_2e-5_0,02_bert.pt"
+    dis_output_file = repo_path + "/../domain_adaptation/models/doc_gan/asd_india_gan-bert_512_32_2e-5_0,02_dis.pt"
+    # bert_output_file = repo_path + "/../domain_adaptation/models/doc_gan/india_gan-bert_512_32_2e-5_0,02_bert.pt"
+    # dis_output_file = repo_path + "/../domain_adaptation/models/doc_gan/india_gan-bert_512_32_2e-5_0,02_dis.pt"
+    label_list = ["0", "1"]
+    get_examples_fct = get_examples
+
+else:
+    raise "Task name not found!"
+
+tf_weights_loadable_version = True
+load_tf_weights = False
 train = True
 multi_gpu = True
-device = torch.device("cuda:4")
+device = torch.device("cuda:3")
 # device = "cpu"
-device_ids = [4,5,6,7]
+device_ids = [3,4,5,6]
 dev_metric = "f1"
-seed = 42
+seed = 129
 
-nll_loss = torch.nn.CrossEntropyLoss(ignore_index=-1)
-adversarial_loss = torch.nn.BCELoss()
+if load_tf_weights:
+    if not tf_weights_loadable_version:
+        raise "Please use the tf_weights_loadable_version of the model"
+    if train:
+        raise "Why are you training if you are loading already trained weights?"
+
+# ******** IMPORTANT NOTE: ********
+# Original implementation of GAN-BERT has an extra class that is never used.
+# For examples, if you originally have positive and negative classes for your task:
+# You have some unlabeled examples too, let's call them "UNK" or "-1".
+# Original implementation adds another class to your discriminator that is never used.
+# So, in order to correctly transfer the weights from the original version,
+# we just add an imaginary extra label to label_list and model. There is no sample
+# labeled with this, so there is no update to its corresponding weights, so it
+# is never used. Note that this may hurt the model if you are training from scratch.
+if tf_weights_loadable_version:
+    label_list.insert(0, "AnythingCanGoHere!")
 
 random.seed(seed)
 np.random.seed(seed)
@@ -75,130 +122,19 @@ print("Maximum sequence length : %d" %max_seq_length)
 print("Batch size : %d" %batch_size)
 print("Learning rate : %.8f" %learning_rate)
 
-class DomainData(Dataset):
-    def __init__(self, examples, label_list, max_seq_length, tokenizer):
-        self.examples = examples
-        self.label_list = label_list
-        label_map = {"-1":-1}
-        for (i, label) in enumerate(label_list):
-            label_map[label] = i
-
-        self.label_map = label_map
-        self.max_seq_length = max_seq_length
-        self.tokenizer = tokenizer
-
-    def __len__(self):
-        return len(self.examples)
-
-    def convert_examples_to_features(self, text, label=None):
-        """Loads a data file into a list of `InputBatch`s."""
-        features = []
-        tokens_a = self.tokenizer.tokenize(text)
-        if len(tokens_a) > self.max_seq_length - 2:
-            tokens_a = tokens_a[0:(self.max_seq_length - 2)]
-
-        tokens = []
-        tokens.append("[CLS]")
-        for token in tokens_a:
-            tokens.append(token)
-
-        tokens.append("[SEP]")
-
-    #    tokens = [token for token in tokens if token in self.tokenizer.vocab.keys() else "[UNK]"]
-        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1] * len(input_ids)
-
-        # Zero-pad up to the sequence length.
-        while len(input_ids) < self.max_seq_length:
-            input_ids.append(0)
-            input_mask.append(0)
-
-        assert len(input_ids) == self.max_seq_length
-        assert len(input_mask) == self.max_seq_length
-
-        if label:
-            label_id = self.label_map[label]
-            return input_ids, input_mask, label_id
-        else:
-            return input_ids, input_mask
-
-    def __getitem__(self, idx):
-        ex = self.examples[idx]
-        input_ids, input_mask, label_id = self.convert_examples_to_features(ex[0], label=ex[1]) # input is -> text, label
-
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        input_mask = torch.tensor(input_mask, dtype=torch.long)
-        label_ids = torch.tensor(label_id, dtype=torch.long)
-
-        return input_ids, input_mask, label_ids
-
-def get_examples(filename, train=False):
-    lines = pd.read_json(filename, orient="records", lines=True)
-    examples = []
-    for (i, line) in lines.iterrows():
-        guid = i
-        text = str(line.text)
-        label = str(int(line.label))
-        if train and np.random.rand() > unlabel_rate:
-            label = "-1" # make the sample unlabeled
-        else:
-            # Balance out the labeled data
-            repeat_num = int(1/unlabel_rate)
-            repeat_num = int(math.log(repeat_num, 2)) - 1
-            if repeat_num < 0:
-                repeat_num = 0
-
-            for _ in range(0, repeat_num):
-                examples.append((text, label))
-
-        examples.append((text, label))
-
-    return examples
-
-def get_examples_qc_rest(filename, train=False):
-    examples = []
-    with open(filename, 'r') as f:
-        contents = f.read()
-        file_as_list = contents.splitlines()
-        for line in file_as_list[1:]:
-            split = line.split(" ")
-            question = ' '.join(split[1:])
-
-            text_a = question
-            inn_split = split[0].split(":")
-            label = inn_split[0] + "_" + inn_split[1]
-
-            if label == "UNK_UNK":
-                label = "-1"
-            else:
-                # Balance out the labeled data
-                repeat_num = int(1/unlabel_rate)
-                repeat_num = int(math.log(repeat_num, 2)) - 1
-                if repeat_num < 0:
-                    repeat_num = 0
-
-                for _ in range(0, repeat_num):
-                    examples.append((text_a, label))
-
-            examples.append((text_a, label))
-        f.close()
-
-    return examples
-
 if train:
-    train_examples = get_examples(train_filename, train=True)
-    val_examples = get_examples(val_filename)
+    # Get examples
+    train_examples = get_examples_fct(train_filename, train=True, label_rate=label_rate)
     random.shuffle(train_examples)
-    random.shuffle(val_examples)
     train_dataloader = DataLoader(dataset=DomainData(train_examples, label_list, max_seq_length, tokenizer), batch_size=batch_size, shuffle=True, drop_last=False)
-    val_dataset = DomainData(val_examples, label_list, max_seq_length, tokenizer)
-    val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size)
+
+    if validation:
+        val_examples = get_examples_fct(val_filename, label_rate=label_rate)
+        val_dataloader = DataLoader(dataset=DomainData(val_examples, label_list, max_seq_length, tokenizer), batch_size=batch_size, shuffle=False, drop_last=False)
 
     num_train_steps = int(len(train_examples) / batch_size * total_epoch_num)
 
+    # Create model
     bert = BertModel.from_pretrained(bert_model, PYTORCH_PRETRAINED_BERT_CACHE)
     generator = Generator1(noise_size=noise_size, output_size=768, hidden_sizes=[768], dropout_rate=0.1)
     discriminator = Discriminator(input_size=768, hidden_sizes=[768], num_labels=len(label_list), dropout_rate=0.1)
@@ -210,34 +146,34 @@ if train:
     generator.to(device)
     discriminator.to(device)
 
-    param_optimizer = list(bert.named_parameters())
-    no_decay = ['bias', 'gamma', 'beta']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.0}
-        ]
-    bert_optimizer = BertAdam(optimizer_grouped_parameters,
-                              lr=bert_learning_rate,
-                              warmup=warmup_proportion,
-                              t_total=num_train_steps)
+    # param_optimizer = list(bert.named_parameters())
+    # no_decay = ['bias', 'gamma', 'beta']
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.01},
+    #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.0}
+    #     ]
+    # bert_optimizer = BertAdam(optimizer_grouped_parameters,
+    #                           lr=bert_learning_rate,
+    #                           warmup=warmup_proportion,
+    #                           t_total=num_train_steps)
 
     gen_optimizer = torch.optim.AdamW(generator.parameters(), lr=learning_rate)
-    dis_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=learning_rate)
+    dis_optimizer = torch.optim.AdamW(list(bert.parameters()) + list(discriminator.parameters()), lr=learning_rate)
 
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_examples))
     logger.info("  Batch size = %d", batch_size)
     logger.info("  Num steps = %d", num_train_steps)
 
+    # Start training
     global_step = 0
-    best_score = 0.0
+    best_loss = 1000.0
+    best_score = -1.0
+    all_scores = []
     bert.train()
     generator.train()
     discriminator.train()
     for epoch_num in trange(int(total_epoch_num), desc="Epoch"):
-        # only_train_dis = False
-        # if epoch_num == 0 or tr_d_loss/3 > tr_g_loss:
-        #     only_train_dis = True
 
         tr_g_loss = 0
         tr_d_loss = 0
@@ -252,77 +188,63 @@ if train:
 
             bert.zero_grad()
             discriminator.zero_grad()
-            generator.zero_grad()
-
-            # Random noise
-            noise = torch.zeros(src_input_ids.shape[0],noise_size, device=device).uniform_(0, 1).requires_grad_(True)
 
             # Real representations
             _, doc_rep = bert(src_input_ids, attention_mask=src_input_mask, output_all_encoded_layers=False)
             D_real_features, D_real_logits, D_real_probs = discriminator(doc_rep)
 
+            # Random noise
+            noise = torch.zeros(src_input_ids.shape[0],noise_size, device=device).uniform_(0, 1)#.requires_grad_(True)
             # Generated representations
             gen_rep = generator(noise)
 
+            ############
+            # Discriminator loss and step
+            ############
+            if tf_weights_loadable_version:
+                label_probs = torch.nn.functional.softmax(D_real_probs[:,1:], dim=-1)
+                real_prob = D_real_probs[:,0]
+            else:
+                label_probs = torch.nn.functional.softmax(D_real_probs[:,:-1], dim=-1)
+                real_prob = D_real_probs[:,-1]
 
-            # TRAIN SEPERATELY:
-
-            # Generator loss and step
-            gen_optimizer.zero_grad()
-            D_fake_features, D_fake_logits, D_fake_probs = discriminator(gen_rep) # for generator
-            g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features.detach(), dim=0) - torch.mean(D_fake_features, dim=0), 2))
-            # NOTE: 0 and 1 is reserved as negative and positive, so we use the -1 index for "isFake?" probability.
-            g_loss = adversarial_loss(D_fake_probs[:,-1], valid)
-            g_loss += g_feat_reg
-
-            # if not only_train_dis:
-            if True:
-            # if global_step > -1 or (tr_d_loss / (nb_tr_steps+1)) < 2.0:
-                g_loss.backward()
-                gen_optimizer.step()
-
+            d_label_loss = nll_loss(label_probs, label_ids.view(-1))
+            d_gan_real_loss = adversarial_loss(real_prob, valid)
+            d_real_loss = d_label_loss + d_gan_real_loss
 
             D_fake_features, D_fake_logits, D_fake_probs = discriminator(gen_rep.detach()) # for discriminator
-            # Discriminator loss and step
-            bert_optimizer.zero_grad()
-            dis_optimizer.zero_grad()
-            label_probs = torch.nn.functional.softmax(D_real_probs[:,:-1], dim=-1)
-            d_label_loss = nll_loss(label_probs, label_ids.view(-1))
-            # d_reg_loss = 0.5 - torch.mean(torch.std(label_probs, dim=0))
-            # d_label_loss += d_reg_loss
-            d_gan_loss = (adversarial_loss(D_real_probs[:,-1], valid) + adversarial_loss(D_fake_probs[:,-1], fake)) / 2
-            d_loss = d_label_loss + d_gan_loss
+            if tf_weights_loadable_version:
+                fake_prob = D_fake_probs[:,0]
+            else:
+                fake_prob = D_fake_probs[:,-1]
+
+            d_gan_fake_loss = adversarial_loss(fake_prob, fake)
+            # d_gan_fake_loss = -torch.mean(torch.log(D_fake_probs[:,0] + epsilon))
+
+            d_loss = d_real_loss + d_gan_fake_loss
             d_loss.backward()
-            bert_optimizer.step()
             dis_optimizer.step()
 
+            ############
+            # Generator loss and step
+            ############
+            generator.zero_grad()
+            D_fake_features, D_fake_logits, D_fake_probs = discriminator(gen_rep) # for generator
 
-            # TRAIN TOGETHER:
-            # bert_optimizer.zero_grad()
-            # gen_optimizer.zero_grad()
-            # dis_optimizer.zero_grad()
+            if tf_weights_loadable_version:
+                fake_prob = D_fake_probs[:,0]
+            else:
+                fake_prob = D_fake_probs[:,-1]
 
-            # # Generator loss
-            # # NOTE: 0 and 1 is reserved as negative and positive, so we use the 2 index for "isReal?" probability.
-            # g_loss = -1 * torch.mean(torch.log(1 - D_fake_probs[:,2] + epsilon))
-            # g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features, dim=0) - torch.mean(D_fake_features, dim=0), 2))
-            # g_loss += g_feat_reg
+            g_loss = adversarial_loss(fake_prob, valid)
+            g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features.detach(), dim=0) - torch.mean(D_fake_features, dim=0), 2))
+            g_loss += g_feat_reg
 
-            # # Discriminator loss
-            # label_probs = torch.nn.functional.softmax(D_real_probs[:,:-1], dim=-1)
-            # d_label_loss = nll_loss(label_probs, label_ids.view(-1))
-            # d_gan_loss = -1 * torch.mean(torch.log(1 - D_real_probs[:,2] + epsilon)) + -1 * torch.mean(torch.log(D_fake_probs[:,2] + epsilon))
-            # d_loss = d_label_loss + d_gan_loss
+            g_loss.backward()
+            gen_optimizer.step()
 
-            # loss = d_loss + g_loss
-            # loss.backward()
-            # bert_optimizer.step()
-            # gen_optimizer.step()
-            # dis_optimizer.step()
-
-
-            tr_g_loss += g_loss.item()
-            tr_d_loss += d_loss.item()
+            tr_g_loss += g_loss.mean().item()
+            tr_d_loss += d_loss.mean().item()
             nb_tr_examples += src_input_ids.size(0)
             nb_tr_steps += 1
             global_step += 1
@@ -330,82 +252,113 @@ if train:
         tr_g_loss /= nb_tr_steps
         tr_d_loss /= nb_tr_steps
 
-        # VALIDATION
-        bert.eval()
-        discriminator.eval()
+        if validation:
+            # VALIDATION
+            bert.eval()
+            discriminator.eval()
 
-        all_preds = np.array([])
-        all_label_ids = np.array([])
-        eval_loss = 0
-        nb_eval_steps = 0
-        for src_input_ids, src_input_mask, label_ids in val_dataloader:
-            src_input_ids = src_input_ids.to(device)
-            src_input_mask = src_input_mask.to(device)
-            label_ids = label_ids.to(device)
+            all_preds = np.array([])
+            all_label_ids = np.array([])
+            eval_loss = 0
+            nb_eval_steps = 0
+            for val_step, (src_input_ids, src_input_mask, label_ids) in enumerate(val_dataloader):
+                src_input_ids = src_input_ids.to(device)
+                src_input_mask = src_input_mask.to(device)
+                label_ids = label_ids.to(device)
 
-            with torch.no_grad():
-                _, doc_rep = bert(src_input_ids, attention_mask=src_input_mask)
-                _, logits, probs = discriminator(doc_rep)
-                print(probs)
-                probs = torch.nn.functional.softmax(probs[:,:-1], dim=-1)
-                tmp_eval_loss = nll_loss(probs, label_ids.view(-1))
+                with torch.no_grad():
+                    _, doc_rep = bert(src_input_ids, attention_mask=src_input_mask)
+                    _, _, probs = discriminator(doc_rep)
 
-            eval_loss += tmp_eval_loss.mean().item()
+                    if tf_weights_loadable_version:
+                        probs = torch.nn.functional.softmax(probs[:,1:], dim=-1)
+                    else:
+                        probs = torch.nn.functional.softmax(probs[:,:-1], dim=-1)
 
-            logits = logits[:,:-1]
-            logits = logits.detach().cpu().numpy()
-            label_ids = label_ids.to('cpu').numpy()
-            all_preds = np.append(all_preds, np.argmax(logits, axis=1))
-            all_label_ids = np.append(all_label_ids, label_ids)
+                    tmp_eval_loss = nll_loss(probs, label_ids.view(-1))
 
-            nb_eval_steps += 1
+                eval_loss += tmp_eval_loss.mean().item()
 
-        eval_loss = eval_loss / nb_eval_steps
-        precision, recall, f1, _ = precision_recall_fscore_support(all_label_ids, all_preds, average="micro", labels=list(range(0,len(label_list))))
-        mcc = matthews_corrcoef(all_preds, all_label_ids)
-        result = {"gen_loss": tr_g_loss,
-                  "dis_loss": tr_d_loss,
-                  "eval_loss": eval_loss,
-                  "precision_micro": precision,
-                  "recall_micro": recall,
-                  "f1_micro": f1,
-                  "mcc": mcc}
+                probs = probs.detach().cpu().numpy()
+                label_ids = label_ids.to('cpu').numpy()
+                all_preds = np.append(all_preds, np.argmax(probs, axis=1))
+                all_label_ids = np.append(all_label_ids, label_ids)
 
-        if dev_metric == "f1":
-            score = f1
-        elif dev_metric == "recall":
-            score = recall
-        elif dev_metric == "precision":
-            score = precision
+                nb_eval_steps += 1
 
-        if best_score < score:
-            best_score = score
-            logger.info("Saving model...")
-            model_to_save = bert.module if hasattr(bert, 'module') else bert  # To handle multi gpu
-            torch.save(model_to_save.state_dict(), bert_output_file)
-            torch.save(discriminator.state_dict(), dis_output_file)
+            eval_loss = eval_loss / nb_eval_steps
+            precision, recall, f1, _ = precision_recall_fscore_support(all_label_ids, all_preds, average="micro", labels=list(range(0,len(label_list))))
+            mcc = matthews_corrcoef(all_preds, all_label_ids)
+            result = {"gen_loss": tr_g_loss,
+                      "dis_loss": tr_d_loss,
+                      "eval_loss": eval_loss,
+                      "precision_micro": precision,
+                      "recall_micro": recall,
+                      "f1_micro": f1,
+                      "mcc": mcc}
 
-        logger.info("***** Epoch " + str(epoch_num + 1) + " *****")
-        for key in sorted(result.keys()):
-            logger.info("  %s = %.4f", key, result[key])
+            if dev_metric == "f1":
+                score = f1
+            elif dev_metric == "recall":
+                score = recall
+            elif dev_metric == "precision":
+                score = precision
+            elif dev_metric == "mcc":
+                score = mcc
 
-        bert.train() # back to training
-        discriminator.train()
+            all_scores.append(score)
+            if best_score < score:
+                best_score = score
+                logger.info("Saving model...")
+                model_to_save = bert.module if hasattr(bert, 'module') else bert  # To handle multi gpu
+                torch.save(model_to_save.state_dict(), bert_output_file)
+                torch.save(discriminator.state_dict(), dis_output_file)
+
+            logger.info("***** Epoch " + str(epoch_num + 1) + " *****")
+            for key in sorted(result.keys()):
+                logger.info("  %s = %.4f", key, result[key])
+
+            bert.train() # back to training
+            discriminator.train()
+
+        else:
+            curr_loss = (tr_g_loss + tr_d_loss * 2) / 3
+            if curr_loss < best_loss:
+                logger.info("***** Saving Model *****")
+                best_loss = curr_loss
+                model_to_save = bert.module if hasattr(bert, 'module') else bert  # To handle multi gpu
+                torch.save(model_to_save.state_dict(), bert_output_file)
+                torch.save(discriminator.state_dict(), dis_output_file)
+
+            logger.info("***** Epoch " + str(epoch_num + 1) + " *****")
+            logger.info("  gen_loss = %.4f", tr_g_loss)
+            logger.info("  dis_loss = %.4f", tr_d_loss)
+
+    if validation:
+        print("All scores are: ")
+        print(all_scores)
 
 
-test_examples = get_examples(test_filename)
+test_examples = get_examples_fct(test_filename, label_rate=label_rate)
 test_dataloader = DataLoader(dataset=DomainData(test_examples, label_list, max_seq_length, tokenizer), batch_size=batch_size)
 
 bert = BertModel.from_pretrained(bert_model, PYTORCH_PRETRAINED_BERT_CACHE)
-discriminator = Discriminator(input_size=768, hidden_sizes=[768], num_labels=2, dropout_rate=0.1)
+discriminator = Discriminator(input_size=768, hidden_sizes=[768], num_labels=len(label_list), dropout_rate=0.1)
 
-bert.load_state_dict(torch.load(bert_output_file))
+if load_tf_weights:
+    bert = get_weights_from_tf(bert, repo_path + "/../domain_adaptation/doc_gan/ganbert_tf/ganbert_output_model/", model_name="bert")
+    discriminator = get_weights_from_tf(discriminator, repo_path + "/../domain_adaptation/doc_gan/ganbert_tf/ganbert_output_model/", model_name="dis")
+    # generator = get_weights_from_tf(generator, repo_path + "/../domain_adaptation/doc_gan/ganbert_tf/ganbert_output_model/", model_name="gen")
+
+else:
+    bert.load_state_dict(torch.load(bert_output_file))
+    discriminator.load_state_dict(torch.load(dis_output_file))
+
+discriminator.to(device)
 bert.to(device)
 if multi_gpu:
     bert = torch.nn.DataParallel(bert, device_ids=device_ids)
 
-discriminator.load_state_dict(torch.load(dis_output_file))
-discriminator.to(device)
 
 all_preds = np.array([])
 all_label_ids = np.array([])
@@ -420,27 +373,35 @@ for src_input_ids, src_input_mask, label_ids in test_dataloader:
 
     with torch.no_grad():
         _, doc_rep = bert(src_input_ids, attention_mask=src_input_mask)
-        _, logits, probs = discriminator(doc_rep)
-        probs = torch.nn.functional.softmax(probs[:,:-1], dim=-1)
+        _, _, probs = discriminator(doc_rep)
+        if tf_weights_loadable_version:
+            probs = torch.nn.functional.softmax(probs[:,1:], dim=-1)
+        else:
+            probs = torch.nn.functional.softmax(probs[:,:-1], dim=-1)
+
         tmp_test_loss = nll_loss(probs, label_ids.view(-1))
 
     test_loss += tmp_test_loss.mean().item()
 
-    logits = logits[:,:-1]
-    logits = logits.detach().cpu().numpy()
+    probs = probs.detach().cpu().numpy()
     label_ids = label_ids.to('cpu').numpy()
-    all_preds = np.append(all_preds, np.argmax(logits, axis=-1))
+    all_preds = np.append(all_preds, np.argmax(probs, axis=1))
     all_label_ids = np.append(all_label_ids, label_ids)
 
     nb_test_steps += 1
 
+# print(all_preds)
 test_loss = test_loss / nb_test_steps
 precision, recall, f1, _ = precision_recall_fscore_support(all_label_ids, all_preds, average="micro", labels=list(range(0,len(label_list))))
+prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(all_label_ids, all_preds, average="macro", labels=list(range(0,len(label_list))))
 mcc = matthews_corrcoef(all_preds, all_label_ids)
 result = {"test_loss": test_loss,
           "precision_micro": precision,
           "recall_micro": recall,
           "f1_micro": f1,
+          "precision_macro": prec_macro,
+          "recall_macro": rec_macro,
+          "f1_macro": f1_macro,
           "mcc": mcc}
 
 logger.info("***** TEST RESULTS *****")
